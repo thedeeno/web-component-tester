@@ -41,8 +41,9 @@ function BrowserRunner(reporter, local, def, options, doneCallback) {
       data.results = this.results;
     }
     this.reporter.emit('browser-end', data);
-    this.browser.quit();
-    doneCallback(err, this);
+    this.browser.quit(function() {
+      doneCallback(err, this);
+    }.bind(this));
   };
 
   // Create wd browser instance
@@ -79,8 +80,10 @@ function BrowserRunner(reporter, local, def, options, doneCallback) {
 }
 BrowserRunner.prototype.onEvent = function(data) {
   this.test.extendTimeout();
-  if (data.event == 'end') {
-    this.test.setResults(data.data);
+  if (!argv['debug-test']) {
+    if (data.event == 'end') {
+      this.test.setResults(data.data);
+    }
   }
 };
 BrowserRunner.prototype.testNextFile = function() {
@@ -102,6 +105,84 @@ BrowserRunner.prototype.testNextFile = function() {
       }
     }.bind(this));
   }
+};
+
+//
+// WebDriver command processing (supports nested commands)
+//
+BrowserRunner.prototype.sendCommand = function(args, doneCallback, stackArg) {
+  debugger;
+  var stack = stackArg || [];
+  if (args) {
+    // New command, push it on the stack
+    stack.unshift({i: 0, args: args, doneCallback: doneCallback});
+  } else {
+    // Otherwise, work from the first command on the stack
+    args = stack[0].args;
+    doneCallback = stack[0].doneCallback;
+  }
+  // If it was a brand new command, switch frame to iframe before processing
+  if (!stackArg) {
+    this.browser.frame(0, function(err) {
+      if (!err) {
+        this.continueCommand(stack);
+      } else {
+        doneCallback(err); 
+      }
+    }.bind(this));
+    return;
+  }
+  // Scan current command's args for nested commands
+  while(stack[0].i < args.length) {
+    var i = stack[0].i;
+    var nestedCommand = null;
+    var arg = args[i];
+    if (Array.isArray(arg)) {
+      nestedCommand = arg;
+    } else if (arg && arg.xpath) {
+      nestedCommand = ['elementByXPath', args[i].xpath];
+    }
+    if (nestedCommand) {
+      this.sendCommand(nestedCommand, function(err, value) {
+        if (!err) {
+          stack[0].args[stack[0].i] = value;
+          stack[0].i++;
+          this.continueCommand(stack);
+        } else {
+          stack[0].doneCallback(err);
+        }
+      }.bind(this), stack);
+      return;
+    }
+    stack[0].i++;
+  }
+  // Ready to run; setup call
+  stack.shift();
+  var fn = args.shift();
+  var done = function(err, value) {
+    // When we're done, switch the frame back
+    if (stack.length == 0) {
+      this.browser.frame(null, function(frameErr) {
+        doneCallback(err || frameErr);
+      });
+    } else {
+      doneCallback(err, value);
+    }
+  }.bind(this);
+  args.push(done);
+  // Make sure it's valid
+  if (!this.browser[fn]) {
+    done({message: 'Error: invalid WebDriver command: ' + fn});
+  }
+  // Go
+  try {
+    this.browser[fn].apply(this.browser, args);
+  } catch (e) {
+    done({message: 'Error executing WebDriver command: ' + fn + ': ' + e});
+  }
+};
+BrowserRunner.prototype.continueCommand = function(stack) {
+  this.sendCommand(null, null, stack);
 };
 
 // Abstraction around a single test runner.html to be run on a given browser
@@ -153,10 +234,12 @@ TestRunner.prototype.resetTimeout = function() {
   }
 };
 TestRunner.prototype.extendTimeout = function() {
-  this.resetTimeout();
-  this.timeoutId = setTimeout(function() {
-    this.doneCallback('Timed out waiting for mochaResults');
-  }.bind(this), this.timeout);
+  if (!argv['debug-test']) {
+    this.resetTimeout();
+    this.timeoutId = setTimeout(function() {
+      this.doneCallback('Timed out waiting for mochaResults');
+    }.bind(this), this.timeout);    
+  }
 };
 
 // Main test running sequence
@@ -183,6 +266,18 @@ function runTests(reporter, server, local, browsers, options, doneCallback) {
       data.platform = browser.platform;
       data.version = browser.version;
       reporter.emit('test-status', data);
+    });
+    socket.on('webdriver command', function(data) {
+      var browserRunner = runners[data.browser];
+      browserRunner.sendCommand(data.args, function(err) {
+        if (err) {
+          socket.emit('webdriver result', {error: err.message});
+        } else {
+          var args = Array.prototype.slice.apply(arguments);
+          args.shift();
+          socket.emit('webdriver result', {results: args});
+        }
+      });
     });
   });
 
@@ -229,6 +324,7 @@ function test(local, browsers, options, doneCallback) {
   var server;
   var reporter = new events.EventEmitter();
   options = extend({}, options);
+  options.port = argv.port || options.port;
   options.startTunnel = local ? false : (options.startTunnel === undefined ? true : options.startTunnel);
   options.startSelenium = local ? (options.startSelenium === undefined) : options.startSelenium;
   if (argv['only-browsers']) {
