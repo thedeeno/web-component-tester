@@ -158,7 +158,7 @@ function fromEnv(env, args, output) {
     }
   }
 
-  options = mixInPlugins(options);
+  options = mergePlugins(options);
 
   return options;
 }
@@ -167,19 +167,17 @@ function fromEnv(env, args, output) {
 /**
  * Mix plugins into configuration
  *
- * This loads the plugin module for every key in `options.plugins` and merges the user-supplied
- * configuration.
+ * Loads the plugin module for every key in `options.plugins` and merges it
+ * with the user-supplied configuration.
  *
- * In other words,
+ * In other words, given:
  *
- * If a `my-plugin` module exports the following:
- *
+ *   # my-plugin.js
  *   module.exports = {
  *     "reporter": function(..)
  *   }
  *
- * and a user supplies the following wct configuration:
- *
+ *   # wct.js
  *   module.exports = {
  *     plugins: {
  *       "my-plugin": {
@@ -188,7 +186,7 @@ function fromEnv(env, args, output) {
  *     }
  *   }
  *
- * the options available to wct will look the following after mixing-in:
+ * mergePlugin(options) produces an object like this:
  *
  *   plugins: {
  *     "my-plugin": {
@@ -198,7 +196,7 @@ function fromEnv(env, args, output) {
  *   }
  *
  */
-function mixInPlugins(options) {
+function mergePlugins(options) {
   _(options.plugins).forOwn(function( userConfig, pluginName ) {
       var moduleConfig = require(pluginName);
       options.plugins[pluginName] = _.merge(moduleConfig, userConfig);
