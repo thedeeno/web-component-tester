@@ -1,3 +1,6 @@
+[![NPM version](http://img.shields.io/npm/v/web-component-tester.svg)](https://npmjs.org/package/web-component-tester)
+[![Build Status](http://img.shields.io/travis/Polymer/web-component-tester.svg)](https://travis-ci.org/Polymer/web-component-tester)
+
 `web-component-tester` makes testing your web components a breeze!
 
 You get a browser-based testing environment, configured out of the box with:
@@ -13,31 +16,30 @@ WCT will [run your tests](#running-your-tests) against whatever browsers you hav
 
 # Getting Started
 
-There's a _wee bit_ of setup necessary.
+## `.html` Suites
 
-
-## Test Index
-
-WCT will, by default, run tests declared in `test/index.html`. Generally, 
-you'll want to use this to load all your test suites:
+Or, you can write tests in separate `.html` documents. For example,
+`test/awesomest-tests.html`:
 
 ```html
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8">
-    <script src="../../webcomponentsjs/webcomponents.js"></script>
-    <script src="../../web-component-tester/browser.js"></script>
-    <script src="../awesome.js"></script>
-  </head>
-  <body>
-    <script>
-      WCT.loadSuites([
-        'awesome-tests.js',
-        'awesomest-tests.html',
-      ]);
-    </script>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <script src="../../webcomponentsjs/webcomponents.min.js"></script>
+  <script src="../../web-component-tester/browser.js"></script>
+  <link rel="import" href="../awesome-element.html">
+</head>
+<body>
+  <awesome-element id="fixture"></awesome-element>
+  <script>
+    suite('<awesome-element>', function() {
+      test('is awesomest', function() {
+        assert.isTrue(document.getElementById('fixture').awesomest);
+      });
+    });
+  </script>
+</body>
 </html>
 ```
 
@@ -53,34 +55,6 @@ suite('AwesomeLib', function() {
     assert.isTrue(AwesomeLib.awesome);
   });
 });
-```
-
-
-## `.html` Suites
-
-Or, you can write tests in separate `.html` documents. For example,
-`test/awesomest-tests.html`:
-
-```html
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <script src="../../webcomponentsjs/webcomponents.js"></script>
-  <script src="../../web-component-tester/browser.js"></script>
-  <link rel="import" href="../awesome-element.html">
-</head>
-<body>
-  <awesome-element id="fixture"></awesome-element>
-  <script>
-    suite('<awesome-element>', function() {
-      test('is awesomest', function() {
-        assert.isTrue(document.getElementById('fixture').awesomest);
-      });
-    });
-  </script>
-</body>
-</html>
 ```
 
 
@@ -105,6 +79,10 @@ run it:
 wct
 ```
 
+By default, any tests under `test/` will be run. You can run particular files
+(or globs of files) via `wct path/to/files`.
+
+
 
 ### Web Server
 
@@ -114,6 +92,31 @@ order to go this route. The recommended approach is to depend on WCT via Bower:
 
 ```sh
 bower install Polymer/web-component-tester --save
+```
+
+#### Nested Suites
+
+To help support this case, you can also directly define an index that will load
+any desired tests:
+
+```html
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <script src="../../webcomponentsjs/webcomponents.min.js"></script>
+    <script src="../../web-component-tester/browser.js"></script>
+    <script src="../awesome.js"></script>
+  </head>
+  <body>
+    <script>
+      WCT.loadSuites([
+        'awesome-tests.js',
+        'awesomest-tests.html',
+      ]);
+    </script>
+  </body>
+</html>
 ```
 
 

@@ -15,6 +15,7 @@ var path   = require('path');
 var yargs  = require('yargs');
 
 var browsers = require('./browsers');
+var paths    = require('./paths');
 
 var HOME_DIR    = path.resolve(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE);
 var CONFIG_NAME = 'wct.conf.js';
@@ -22,6 +23,8 @@ var CONFIG_NAME = 'wct.conf.js';
 // The full set of options, as a reference.
 function defaults() {
   return {
+    // The test suites that should be run.
+    suites:      ['test/'],
     // Output stream to write log messages to.
     output:      process.stdout,
     // Whether the output stream should be treated as a TTY (and be given more
@@ -33,20 +36,20 @@ function defaults() {
     expanded:    true,
     // Whether the default set of local (or remote) browsers should be targeted.
     remote:      false,
-    // The on-disk path where tests & static files should be served from.
-    root:        path.resolve('.'),
-    // The component being tested. Must be a directory under `root`.
-    component:   path.basename(process.cwd()),
+    // The on-disk path where tests & static files should be served from. By
+    // default, this is the directory above the current project (so that
+    // element repos can be easily tested with their dependencies).
+    root:        undefined,
     // The browsers that tests will be run on. Accepts capabilities objects,
     // local browser names ("chrome" etc), or remote browsers of the form
     // "<PLATFORM>/<BROWSER>[@<VERSION>]".
     browsers:    [],
-    // The file (mounted under `<root>/<component>`) that runs the tests.
-    webRunner:   'test/index.html',
     // Idle timeout for tests.
     testTimeout: 90 * 1000,
     // Whether the browser should be closed after the tests run.
     persistent:  false,
+    // Additional .js files to include in *generated* test indexes.
+    extraScripts: [],
     // Extra capabilities to pass to wd when building a client.
     //
     // Selenium: https://code.google.com/p/selenium/wiki/DesiredCapabilities
@@ -71,12 +74,10 @@ function parseArgs(args) {
       .usage(
         '\n' + // Even margin.
         'Run tests for web components across local or remote browsers.\n' +
-        'Usage: ' + chalk.blue('$0') + '\n' +
+        'Usage: ' + chalk.blue('$0' + chalk.dim(' <options> [dirs or paths/to/test ...]')) + '\n' +
         '\n' +
         'wct will search up from the current directory to find your project root (first\n' +
-        'directory containing a webRunner or wct.conf.js)\n' +
-        '\n' +
-        'Specific browsers can be tested via the --browsers flag.\n' +
+        'directory containing a wct.conf.js - or current directory if not found.)\n' +
         '\n' +
         'Local browsers are specified via short names:\n' +
         browsers.present().join(', ') + '\n' +
@@ -96,13 +97,13 @@ function parseArgs(args) {
           description: 'Run specific browsers, rather than the defaults.',
           alias: 'b',
         },
-        'webRunner': {
-          description: 'The entry point to your test suite.',
-        },
         'persistent': {
           description: 'Keep browsers active (refresh to rerun tests).',
           alias: 'p',
           boolean: true,
+        },
+        'root': {
+          description: 'The root directory to serve tests from.',
         },
         'expanded': {
           description: 'Log a status line for each test run.',
@@ -113,7 +114,7 @@ function parseArgs(args) {
           boolean: true,
         },
         'simpleOutput': {
-          description: 'Avoid fancy terminal tricks (pinned status)',
+          description: 'Avoid fancy terminal tricks.',
           boolean: true,
         },
       })
@@ -123,12 +124,7 @@ function parseArgs(args) {
 function fromEnv(env, args, output) {
   var argv = parseArgs(args);
 
-  var options = {
-    webRunner:  argv.webRunner,
-    verbose:    argv.verbose,
-    expanded:   Boolean(argv.expanded), // override the default of true.
-    persistent: argv.persistent,
-    remote:     Boolean(argv.remote),
+  var options = _.merge(argv, {
     output:     output,
     ttyOutput:  output.isTTY && !argv.simpleOutput,
     sauce: {
@@ -136,7 +132,7 @@ function fromEnv(env, args, output) {
       accessKey: env.SAUCE_ACCESS_KEY,
       tunnelId:  env.SAUCE_TUNNEL_ID,
     }
-  };
+  });
 
   if (argv.browsers) {
     var browsers = _.isArray(argv.browsers) ? argv.browsers : [argv.browsers];
@@ -147,22 +143,13 @@ function fromEnv(env, args, output) {
   options.extraArgs = argv._;
 
   options = _.merge(defaults(), fromDisk(), options);
-  // Now that we have a fully specified set of options, project root:
-  if (!options.root) {
-    var webRunnerPath = findup(options.webRunner);
-    if (webRunnerPath) {
-      options.root = webRunnerPath.slice(0, -options.webRunner.length);
-    }
-  }
-
   options = mergePlugins(options);
 
   return options;
 }
 
-
 /**
- * Mix plugins into configuration
+ * Mix plugins into configuration.
  *
  * Loads the plugin module for every key in `options.plugins` and merges it
  * with the user-supplied configuration.
@@ -211,15 +198,85 @@ function fromDisk() {
   var configs = _.filter(paths, fs.existsSync).map(require);
   var options = _.merge.apply(_, [{}].concat(configs));
 
-  if (projectFile && projectFile !== globalFile) {
-    options.root = projectFile.slice(0, -CONFIG_NAME.length);
+  if (!options.root && projectFile && projectFile !== globalFile) {
+    process.chdir(path.dirname(projectFile));
   }
 
   return options;
+}
+
+/**
+ * Expands values within the configuration based on the current environment.
+ *
+ * @param {!Object} options The configuration to expand.
+ * @param {string} baseDir The directory paths should be relative to.
+ * @param {function(*, options)} Callback given the expanded options on success.
+ */
+function expand(options, baseDir, done) {
+  var root = options.root || baseDir;
+
+  browsers.expand(options.browsers, options.remote, function(error, browsers) {
+    if (error) return done(error);
+    options.browsers = browsers;
+
+    paths.expand(root, options.suites, function(error, suites) {
+      if (error) return done(error);
+
+      options.suites = suites;
+      // Serve from the parent directory so that we can reference element deps.
+      if (!options.root) {
+        serveFromParent(root, options);
+      }
+
+      validate(options, function(error) {
+        done(error, options);
+      });
+    });
+  });
+}
+
+/**
+ * @param {!Object} options The configuration to validate.
+ * @param {function(*)} Callback indicating whether the configuration is valid.
+ */
+function validate(options, done) {
+  if (options.webRunner) {
+    return done('webRunner is no longer a supported configuration option. Please list the files you wish to test as arguments, or as `suites` in a configuration object.');
+  }
+  if (options.component) {
+    return done('component is no longer a supported configuration option. Please list the files you wish to test as arguments, or as `suites` in a configuration object.');
+  }
+
+  if (options.browsers.length === 0) {
+    return done('No browsers configured to run');
+  }
+  if (options.suites.length === 0) {
+    return done('No test suites were found matching your configuration');
+  }
+
+  done(null);
+}
+
+
+/**
+ * Sets options.root to the parent directory of `baseDir`, and adjusts all
+ * suites relative to it.
+ *
+ * @param {string} baseDir
+ * @param {!Object} options
+ */
+function serveFromParent(baseDir, options) {
+  options.root = path.dirname(baseDir);
+
+  var basename = path.basename(baseDir);
+  options.suites = _.map(options.suites || [], function(file) {
+    return path.join(basename, file);
+  });
 }
 
 module.exports = {
   defaults: defaults,
   fromEnv:  fromEnv,
   fromDisk: fromDisk,
+  expand:   expand,
 };

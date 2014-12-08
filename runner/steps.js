@@ -12,6 +12,7 @@ var async        = require('async');
 var chalk        = require('chalk');
 var express      = require('express');
 var freeport     = require('freeport');
+var fs           = require('fs');
 var http         = require('http');
 var path         = require('path');
 var sauceConnect = require('sauce-connect-launcher');
@@ -25,14 +26,17 @@ var which        = require('which');
 
 var BrowserRunner = require('./browserrunner');
 var CleanKill     = require('./cleankill');
-var browsers      = require('./browsers');
 
 // We prefer serving local assets over bower assets.
 var PACKAGE_ROOT = path.resolve(__dirname, '..');
-var SERVE_STATIC = {
-  '/web-component-tester/browser.js':     path.join(PACKAGE_ROOT, 'browser.js'),
-  '/web-component-tester/environment.js': path.join(PACKAGE_ROOT, 'environment.js'),
+var SERVE_STATIC = {  // Keys are regexps.
+  '^.*/web-component-tester/browser\\.js$':     path.join(PACKAGE_ROOT, 'browser.js'),
+  '^.*/web-component-tester/environment\\.js$': path.join(PACKAGE_ROOT, 'environment.js'),
 };
+
+var INDEX_TEMPLATE = _.template(fs.readFileSync(
+  path.resolve(__dirname, '../data/index.html'), {encoding: 'utf-8'}
+));
 
 // Steps
 function ensureSauceTunnel(options, emitter, done) {
@@ -119,10 +123,16 @@ function startStaticServer(options, emitter, done) {
     });
 
     _.each(SERVE_STATIC, function(file, url) {
-      app.get(url, function(request, response) {
+      app.get(new RegExp(url), function(request, response) {
         send(request, file).pipe(response);
       });
     });
+
+    if (options._webRunnerContent) {
+      app.get(options._webRunner, function(request, response) {
+        response.send(options._webRunnerContent);
+      });
+    }
 
     // Add plugin middleware
     _.values(options.plugins).forEach(function(plugin) {
@@ -149,53 +159,58 @@ function startStaticServer(options, emitter, done) {
 }
 
 function runTests(options, emitter, done) {
-  browsers.expand(options.browsers, options.remote, function(error, browsers) {
+  injectWebRunner(options);
 
+  var jobs = {
+    http: startStaticServer.bind(null, options, emitter),
+  };
+  if (_.any(options.browsers, isLocal)) {
+    jobs.selenium = startSeleniumServer.bind(null, options, emitter);
+  }
+  if (!_.every(options.browsers, isLocal)) {
+    if (!assertSauceCredentials(options, done)) return; // Assert for the runners.
+    jobs.sauceTunnel = ensureSauceTunnel.bind(null, options, emitter);
+  }
+
+  async.parallel(jobs, function(error, results) {
     if (error) return done(error);
-    emitter.emit('log:debug', 'Expanded browsers:', options.browsers);
-    options.browsers = browsers;
 
-    var jobs = {
-      http: startStaticServer.bind(null, options, emitter),
-    };
-    if (_.any(options.browsers, isLocal)) {
-      jobs.selenium = startSeleniumServer.bind(null, options, emitter);
-    }
-    if (!_.every(options.browsers, isLocal)) {
-      if (!assertSauceCredentials(options, done)) return; // Assert for the runners.
-      jobs.sauceTunnel = ensureSauceTunnel.bind(null, options, emitter);
+    // TODO(nevir): Clean up hackish semi-private options.
+    options._seleniumPort = results.selenium;
+    options._httpPort     = results.http.port;
+    if (results.sauceTunnel) {
+      options.browserOptions['tunnel-identifier'] = results.sauceTunnel;
     }
 
-    async.parallel(jobs, function(error, results) {
-      if (error) return done(error);
-
-      // TODO(nevir): Clean up hackish semi-private options.
-      options._seleniumPort = results.selenium;
-      options._httpPort     = results.http.port;
-      if (results.sauceTunnel) {
-        options.browserOptions['tunnel-identifier'] = results.sauceTunnel;
+    var failed = false;
+    var runners = runBrowsers(options, emitter, function(error) {
+      if (error) {
+        done(error);
+      } else {
+        done(failed ? 'Had failed tests' : null);
       }
+    });
 
-      var failed = false;
-      var runners = runBrowsers(options, emitter, function(error) {
-        if (error) {
-          done(error);
-        } else {
-          done(failed ? 'Had failed tests' : null);
-        }
-      });
-
-      socketIO(results.http).on('connection', function(socket) {
-        emitter.emit('log:debug', 'Test client opened sideband socket');
-        socket.on('client-event', function(data) {
-          runners[data.browserId].onEvent(data.event, data.data);
-        });
+    socketIO(results.http).on('connection', function(socket) {
+      emitter.emit('log:debug', 'Test client opened sideband socket');
+      socket.on('client-event', function(data) {
+        runners[data.browserId].onEvent(data.event, data.data);
       });
     });
   });
 }
 
 // Helpers
+
+function injectWebRunner(options) {
+  // Short circuit if we have only one .html suite to run: Run it directly.
+  if (options.suites.length === 1 && options.suites[0].slice(-5) === '.html') {
+    options._webRunner = '/' + options.suites[0];
+  } else {
+    options._webRunner = '/generated-index.html';
+    options._webRunnerContent = INDEX_TEMPLATE(options);
+  }
+}
 
 function checkSeleniumEnvironment(done) {
   which('java', function(error) {
